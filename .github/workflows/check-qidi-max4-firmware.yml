@@ -1,0 +1,183 @@
+name: Check QIDI Max 4 Firmware
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      current_version:
+        description: "Override current firmware version"
+        required: false
+        type: string
+      download_package:
+        description: "Download package when update is available"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  check-firmware:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      need_update: ${{ steps.parse.outputs.need_update }}
+      version: ${{ steps.parse.outputs.version }}
+      url: ${{ steps.parse.outputs.url }}
+      description: ${{ steps.parse.outputs.description }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Load firmware check settings
+        id: settings
+        run: |
+          SETTINGS_FILE=".github/qidi_max4_firmware_check.json"
+          CURRENT_VERSION=$(jq -r '.current_version' "$SETTINGS_FILE")
+          HARDWARE=$(jq -r '.hardware' "$SETTINGS_FILE")
+          DEVICE_TYPE=$(jq -r '.device_type' "$SETTINGS_FILE")
+          REGION=$(jq -r '.region' "$SETTINGS_FILE")
+          VERSION_HEADER=$(jq -r '.version_header' "$SETTINGS_FILE")
+          ACCEPT_LANGUAGE=$(jq -r '.accept_language' "$SETTINGS_FILE")
+          TIMEZONE=$(jq -r '.timezone' "$SETTINGS_FILE")
+          PLATFORM=$(jq -r '.platform' "$SETTINGS_FILE")
+          USER_AGENT=$(jq -r '.user_agent' "$SETTINGS_FILE")
+
+          if [ -n "${{ inputs.current_version }}" ]; then
+            CURRENT_VERSION="${{ inputs.current_version }}"
+          fi
+
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "hardware=$HARDWARE" >> "$GITHUB_OUTPUT"
+          echo "device_type=$DEVICE_TYPE" >> "$GITHUB_OUTPUT"
+          echo "region=$REGION" >> "$GITHUB_OUTPUT"
+          echo "version_header=$VERSION_HEADER" >> "$GITHUB_OUTPUT"
+          echo "accept_language=$ACCEPT_LANGUAGE" >> "$GITHUB_OUTPUT"
+          echo "timezone=$TIMEZONE" >> "$GITHUB_OUTPUT"
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "user_agent=$USER_AGENT" >> "$GITHUB_OUTPUT"
+
+      - name: Query firmware endpoint
+        id: query
+        env:
+          QIDI_MAX4_DEVICE_ID: ${{ secrets.QIDI_MAX4_DEVICE_ID }}
+          QIDI_MAX4_SIGNATURE: ${{ secrets.QIDI_MAX4_SIGNATURE }}
+        run: |
+          if [ -z "$QIDI_MAX4_DEVICE_ID" ]; then
+            echo "Missing secret QIDI_MAX4_DEVICE_ID" >&2
+            exit 1
+          fi
+
+          if [ -z "$QIDI_MAX4_SIGNATURE" ]; then
+            echo "Missing secret QIDI_MAX4_SIGNATURE" >&2
+            exit 1
+          fi
+
+          echo "::add-mask::$QIDI_MAX4_DEVICE_ID"
+          echo "::add-mask::$QIDI_MAX4_SIGNATURE"
+
+          TS=$(($(date +%s%N)/1000000))
+          NONCE=$(openssl rand -hex 16)
+          API_URL="https://api.qidimaker.com/backend/v1/fireware/upgrade-info"
+
+          curl -sS --get "$API_URL" \
+            --data-urlencode "hardware=${{ steps.settings.outputs.hardware }}" \
+            --data-urlencode "currentVersion=${{ steps.settings.outputs.current_version }}" \
+            --data-urlencode "deviceId=${QIDI_MAX4_DEVICE_ID}" \
+            -H "User-Agent: ${{ steps.settings.outputs.user_agent }}" \
+            -H "Accept: */*" \
+            -H "Accept-Language: ${{ steps.settings.outputs.accept_language }}" \
+            -H "Content-Type: application/json" \
+            -H "X-DeviceId: ${QIDI_MAX4_DEVICE_ID}" \
+            -H "X-DeviceType: ${{ steps.settings.outputs.device_type }}" \
+            -H "X-Nonce: ${NONCE}" \
+            -H "X-Platform: ${{ steps.settings.outputs.platform }}" \
+            -H "X-Region: ${{ steps.settings.outputs.region }}" \
+            -H "X-Signature: ${QIDI_MAX4_SIGNATURE}" \
+            -H "X-Timestamp: ${TS}" \
+            -H "X-Timezone: ${{ steps.settings.outputs.timezone }}" \
+            -H "X-Version: ${{ steps.settings.outputs.version_header }}" \
+            > qidi-max4-update-response.json
+
+          perl -0pe 's/\Q$ENV{QIDI_MAX4_DEVICE_ID}\E/[REDACTED_DEVICE_ID]/g; s/\Q$ENV{QIDI_MAX4_SIGNATURE}\E/[REDACTED_SIGNATURE]/g' \
+            qidi-max4-update-response.json > qidi-max4-update-response.sanitized.json
+
+      - name: Parse response
+        id: parse
+        run: |
+          if ! CODE=$(jq -r '.code // empty' qidi-max4-update-response.json); then
+            echo "Firmware endpoint response was not valid JSON" >&2
+            exit 1
+          fi
+
+          MESSAGE=$(jq -r '.message // empty' qidi-max4-update-response.json)
+          if [ "$CODE" != "200" ]; then
+            echo "Unexpected API response code: ${CODE:-unknown}" >&2
+            if [ -n "$MESSAGE" ]; then
+              echo "API message: $MESSAGE" >&2
+            fi
+            exit 1
+          fi
+
+          NEED_UPDATE=$(jq -r '.data.needUpdate' qidi-max4-update-response.json)
+          VERSION=$(jq -r '.data.version' qidi-max4-update-response.json)
+          URL=$(jq -r '.data.url' qidi-max4-update-response.json)
+          DESCRIPTION=$(jq -r '.data.description' qidi-max4-update-response.json)
+          APK_SIZE=$(jq -r '.data.apkSize' qidi-max4-update-response.json)
+          IS_FORCE=$(jq -r '.data.isForce' qidi-max4-update-response.json)
+
+          echo "need_update=$NEED_UPDATE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "description<<EOF"
+            echo "$DESCRIPTION"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## QIDI Max 4 Firmware Check"
+            echo ""
+            echo "- Current version: `${{ steps.settings.outputs.current_version }}`"
+            echo "- Update available: `$NEED_UPDATE`"
+            echo "- Available version: `$VERSION`"
+            echo "- Forced update: `$IS_FORCE`"
+            echo "- Package size: `$APK_SIZE`"
+            echo "- Release notes: $DESCRIPTION"
+            echo "- Package URL: $URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized response
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qidi-max4-update-response-sanitized
+          path: qidi-max4-update-response.sanitized.json
+          if-no-files-found: ignore
+
+  download-package:
+    runs-on: ubuntu-latest
+    needs: check-firmware
+    if: needs.check-firmware.outputs.need_update == 'true' && inputs.download_package == true
+    permissions:
+      contents: read
+    steps:
+      - name: Download package
+        run: |
+          wget -O qidi-max4-firmware.zip "${{ needs.check-firmware.outputs.url }}"
+          sha256sum qidi-max4-firmware.zip | tee qidi-max4-firmware.sha256
+          file qidi-max4-firmware.zip | tee qidi-max4-firmware.file.txt
+
+      - name: Inspect archive contents
+        run: |
+          unzip -l qidi-max4-firmware.zip | tee qidi-max4-firmware.contents.txt
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qidi-max4-firmware-package
+          path: |
+            qidi-max4-firmware.zip
+            qidi-max4-firmware.sha256
+            qidi-max4-firmware.file.txt
+            qidi-max4-firmware.contents.txt
