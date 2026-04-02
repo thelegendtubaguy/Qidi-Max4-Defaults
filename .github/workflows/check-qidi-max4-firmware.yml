@@ -14,6 +14,11 @@ on:
         required: false
         default: false
         type: boolean
+      publish_release:
+        description: "Create a GitHub release when update is available"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   check-firmware:
@@ -22,9 +27,14 @@ jobs:
       contents: read
     outputs:
       need_update: ${{ steps.parse.outputs.need_update }}
+      current_version: ${{ steps.settings.outputs.current_version }}
       version: ${{ steps.parse.outputs.version }}
       url: ${{ steps.parse.outputs.url }}
       description: ${{ steps.parse.outputs.description }}
+      apk_size: ${{ steps.parse.outputs.apk_size }}
+      is_force: ${{ steps.parse.outputs.is_force }}
+      release_tag: ${{ steps.release_meta.outputs.release_tag }}
+      release_exists: ${{ steps.release_check.outputs.exists }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -60,20 +70,26 @@ jobs:
       - name: Query firmware endpoint
         id: query
         env:
-          QIDI_MAX4_DEVICE_ID: ${{ secrets.QIDI_MAX4_DEVICE_ID }}
-          QIDI_MAX4_SIGNATURE: ${{ secrets.QIDI_MAX4_SIGNATURE }}
+          QIDI_MAX4_DEVICE_ID_SECRET: ${{ secrets.QIDI_MAX4_DEVICE_ID }}
         run: |
-          if [ -z "$QIDI_MAX4_DEVICE_ID" ]; then
+          if [ -z "$QIDI_MAX4_DEVICE_ID_SECRET" ]; then
             echo "Missing secret QIDI_MAX4_DEVICE_ID" >&2
             exit 1
           fi
 
+          echo "::add-mask::$QIDI_MAX4_DEVICE_ID_SECRET"
+          QIDI_MAX4_DEVICE_ID=$(printf '%s' "$QIDI_MAX4_DEVICE_ID_SECRET" | tr '[:lower:]' '[:upper:]')
+          unset QIDI_MAX4_DEVICE_ID_SECRET
+          echo "::add-mask::$QIDI_MAX4_DEVICE_ID"
+
+          # Mirror the embedded client's non-empty HMAC signature generation.
+          QIDI_MAX4_SIGNATURE=$(printf '%s' 'qidi3d null' | openssl dgst -sha256 -hmac 'qid3d-from-2025-CAFE-BABE' -binary | od -An -tx1 | tr -d ' \n')
+
           if [ -z "$QIDI_MAX4_SIGNATURE" ]; then
-            echo "Missing secret QIDI_MAX4_SIGNATURE" >&2
+            echo "Failed to generate X-Signature" >&2
             exit 1
           fi
 
-          echo "::add-mask::$QIDI_MAX4_DEVICE_ID"
           echo "::add-mask::$QIDI_MAX4_SIGNATURE"
 
           TS=$(($(date +%s%N)/1000000))
@@ -99,8 +115,12 @@ jobs:
             -H "X-Version: ${{ steps.settings.outputs.version_header }}" \
             > qidi-max4-update-response.json
 
-          perl -0pe 's/\Q$ENV{QIDI_MAX4_DEVICE_ID}\E/[REDACTED_DEVICE_ID]/g; s/\Q$ENV{QIDI_MAX4_SIGNATURE}\E/[REDACTED_SIGNATURE]/g' \
+          QIDI_MAX4_DEVICE_ID="$QIDI_MAX4_DEVICE_ID" QIDI_MAX4_SIGNATURE="$QIDI_MAX4_SIGNATURE" \
+            perl -0pe 's/\Q$ENV{QIDI_MAX4_DEVICE_ID}\E/[REDACTED_DEVICE_ID]/g; s/\Q$ENV{QIDI_MAX4_SIGNATURE}\E/[REDACTED_SIGNATURE]/g' \
             qidi-max4-update-response.json > qidi-max4-update-response.sanitized.json
+
+          unset QIDI_MAX4_DEVICE_ID
+          unset QIDI_MAX4_SIGNATURE
 
       - name: Parse response
         id: parse
@@ -129,6 +149,8 @@ jobs:
           echo "need_update=$NEED_UPDATE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "apk_size=$APK_SIZE" >> "$GITHUB_OUTPUT"
+          echo "is_force=$IS_FORCE" >> "$GITHUB_OUTPUT"
           {
             echo "description<<EOF"
             echo "$DESCRIPTION"
@@ -147,6 +169,45 @@ jobs:
             echo "- Package URL: $URL"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Prepare release metadata
+        id: release_meta
+        run: |
+          RELEASE_TAG=""
+          if [ "${{ steps.parse.outputs.need_update }}" = "true" ] && [ -n "${{ steps.parse.outputs.version }}" ] && [ "${{ steps.parse.outputs.version }}" != "null" ]; then
+            RELEASE_TAG="qidi-max4-firmware-${{ steps.parse.outputs.version }}"
+          fi
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing release
+        id: release_check
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            if (!tag) {
+              core.setOutput('exists', 'false');
+              return;
+            }
+
+            try {
+              await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              core.setOutput('exists', 'true');
+            } catch (error) {
+              if (error.status === 404) {
+                core.setOutput('exists', 'false');
+                return;
+              }
+
+              throw error;
+            }
+
       - name: Upload sanitized response
         if: always()
         uses: actions/upload-artifact@v4
@@ -158,26 +219,65 @@ jobs:
   download-package:
     runs-on: ubuntu-latest
     needs: check-firmware
-    if: needs.check-firmware.outputs.need_update == 'true' && inputs.download_package == true
+    if: needs.check-firmware.outputs.need_update == 'true' && needs.check-firmware.outputs.release_exists != 'true' && (github.event_name == 'schedule' || inputs.download_package == true || inputs.publish_release == true)
     permissions:
       contents: read
     steps:
       - name: Download package
         run: |
-          wget -O qidi-max4-firmware.zip "${{ needs.check-firmware.outputs.url }}"
-          sha256sum qidi-max4-firmware.zip | tee qidi-max4-firmware.sha256
-          file qidi-max4-firmware.zip | tee qidi-max4-firmware.file.txt
+          PACKAGE_URL="${{ needs.check-firmware.outputs.url }}"
+          PACKAGE_NAME=$(basename "${PACKAGE_URL%%\?*}")
+          PACKAGE_DIR="package-artifacts"
+
+          mkdir -p "$PACKAGE_DIR"
+
+          wget -O "$PACKAGE_DIR/$PACKAGE_NAME" "$PACKAGE_URL"
+          sha256sum "$PACKAGE_DIR/$PACKAGE_NAME" | tee "$PACKAGE_DIR/$PACKAGE_NAME.sha256"
+          file "$PACKAGE_DIR/$PACKAGE_NAME" | tee "$PACKAGE_DIR/$PACKAGE_NAME.file.txt"
 
       - name: Inspect archive contents
         run: |
-          unzip -l qidi-max4-firmware.zip | tee qidi-max4-firmware.contents.txt
+          PACKAGE_URL="${{ needs.check-firmware.outputs.url }}"
+          PACKAGE_NAME=$(basename "${PACKAGE_URL%%\?*}")
+          PACKAGE_DIR="package-artifacts"
+
+          unzip -l "$PACKAGE_DIR/$PACKAGE_NAME" | tee "$PACKAGE_DIR/$PACKAGE_NAME.contents.txt"
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4
         with:
           name: qidi-max4-firmware-package
           path: |
-            qidi-max4-firmware.zip
-            qidi-max4-firmware.sha256
-            qidi-max4-firmware.file.txt
-            qidi-max4-firmware.contents.txt
+            package-artifacts/*
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs:
+      - check-firmware
+      - download-package
+    if: needs.check-firmware.outputs.need_update == 'true' && needs.check-firmware.outputs.release_exists != 'true' && (github.event_name == 'schedule' || inputs.publish_release == true)
+    permissions:
+      contents: write
+    steps:
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: qidi-max4-firmware-package
+          path: release-assets
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check-firmware.outputs.release_tag }}
+          name: QIDI Max 4 Firmware ${{ needs.check-firmware.outputs.version }}
+          body: |
+            Source current version: `${{ needs.check-firmware.outputs.current_version }}`
+            Available version: `${{ needs.check-firmware.outputs.version }}`
+            Forced update: `${{ needs.check-firmware.outputs.is_force }}`
+            Package size: `${{ needs.check-firmware.outputs.apk_size }}`
+            Release notes URL: ${{ needs.check-firmware.outputs.description }}
+            Original QIDI package URL: ${{ needs.check-firmware.outputs.url }}
+            Source: QIDI Max 4 firmware metadata endpoint
+          files: |
+            release-assets/package-artifacts/*
+          fail_on_unmatched_files: true
