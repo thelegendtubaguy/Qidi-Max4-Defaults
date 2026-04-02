@@ -37,7 +37,7 @@ jobs:
       release_exists: ${{ steps.release_check.outputs.exists }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Load firmware check settings
         id: settings
@@ -181,7 +181,7 @@ jobs:
 
       - name: Check for existing release
         id: release_check
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
         with:
@@ -210,7 +210,7 @@ jobs:
 
       - name: Upload sanitized response
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qidi-max4-update-response-sanitized
           path: qidi-max4-update-response.sanitized.json
@@ -226,6 +226,7 @@ jobs:
       - name: Download package
         run: |
           PACKAGE_URL="${{ needs.check-firmware.outputs.url }}"
+          # Preserve the vendor filename exactly as published by QIDI.
           PACKAGE_NAME=$(basename "${PACKAGE_URL%%\?*}")
           PACKAGE_DIR="package-artifacts"
 
@@ -244,7 +245,7 @@ jobs:
           unzip -l "$PACKAGE_DIR/$PACKAGE_NAME" | tee "$PACKAGE_DIR/$PACKAGE_NAME.contents.txt"
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qidi-max4-firmware-package
           path: |
@@ -260,24 +261,91 @@ jobs:
       contents: write
     steps:
       - name: Download package artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: qidi-max4-firmware-package
-          path: release-assets
+          path: release-assets/package-artifacts
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: actions/github-script@v8
+        env:
+          RELEASE_TAG: ${{ needs.check-firmware.outputs.release_tag }}
+          RELEASE_NAME: QIDI Max 4 Firmware ${{ needs.check-firmware.outputs.version }}
+          CURRENT_VERSION: ${{ needs.check-firmware.outputs.current_version }}
+          AVAILABLE_VERSION: ${{ needs.check-firmware.outputs.version }}
+          IS_FORCE: ${{ needs.check-firmware.outputs.is_force }}
+          APK_SIZE: ${{ needs.check-firmware.outputs.apk_size }}
+          DESCRIPTION_URL: ${{ needs.check-firmware.outputs.description }}
+          PACKAGE_URL: ${{ needs.check-firmware.outputs.url }}
+          ASSET_DIR: release-assets/package-artifacts
         with:
-          tag_name: ${{ needs.check-firmware.outputs.release_tag }}
-          name: QIDI Max 4 Firmware ${{ needs.check-firmware.outputs.version }}
-          body: |
-            Source current version: `${{ needs.check-firmware.outputs.current_version }}`
-            Available version: `${{ needs.check-firmware.outputs.version }}`
-            Forced update: `${{ needs.check-firmware.outputs.is_force }}`
-            Package size: `${{ needs.check-firmware.outputs.apk_size }}`
-            Release notes URL: ${{ needs.check-firmware.outputs.description }}
-            Original QIDI package URL: ${{ needs.check-firmware.outputs.url }}
-            Source: QIDI Max 4 firmware metadata endpoint
-          files: |
-            release-assets/package-artifacts/*
-          fail_on_unmatched_files: true
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const assetDir = process.env.ASSET_DIR;
+
+            const assetFiles = fs.readdirSync(assetDir)
+              .map((name) => path.join(assetDir, name))
+              .filter((filePath) => fs.statSync(filePath).isFile())
+              .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+
+            if (assetFiles.length === 0) {
+              core.setFailed(`No release assets found in ${assetDir}`);
+              return;
+            }
+
+            const zipAssets = assetFiles.filter((filePath) => filePath.toLowerCase().endsWith('.zip'));
+            if (zipAssets.length === 0) {
+              core.setFailed(`No firmware zip asset found in ${assetDir}`);
+              return;
+            }
+
+            const packageFilename = path.basename(zipAssets[0]);
+
+            const releaseBody = [
+              '## Package Metadata',
+              `- Source current version: \`${process.env.CURRENT_VERSION}\``,
+              `- Available version: \`${process.env.AVAILABLE_VERSION}\``,
+              `- Forced update: \`${process.env.IS_FORCE}\``,
+              `- Package size: \`${process.env.APK_SIZE}\``,
+              `- Release notes URL: ${process.env.DESCRIPTION_URL}`,
+              `- Original QIDI package URL: ${process.env.PACKAGE_URL}`,
+              '',
+              '## Offline Update Instructions',
+              '1. Create a new folder on your USB drive and name it `QD_Update`.',
+              `2. Download the attached firmware package asset \`${packageFilename}\` from this release.`,
+              '3. Drag the compressed file directly into the `QD_Update` folder without extracting it.',
+              '4. Insert the USB drive into your machine and perform the offline update.',
+              '',
+              'Source: QIDI Max 4 firmware metadata endpoint',
+            ].join('\n');
+
+            const { data: release } = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: process.env.RELEASE_TAG,
+              name: process.env.RELEASE_NAME,
+              body: releaseBody,
+              draft: false,
+              prerelease: false,
+              generate_release_notes: false,
+            });
+
+            for (const filePath of assetFiles) {
+              const data = fs.readFileSync(filePath);
+
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: release.id,
+                name: path.basename(filePath),
+                data,
+                headers: {
+                  'content-type': 'application/octet-stream',
+                  'content-length': data.length,
+                },
+              });
+            }
