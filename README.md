@@ -4,6 +4,9 @@ This repository exists to keep track of the QIDI Max 4 firmware configs QIDI is 
 
 Use tags and commit history to compare what changed between firmware releases.
 
+> [!NOTE]
+> If you want to help support content like this, consider subscribing over on [YouTube](https://youtube.com/@TubaMakes)!
+
 ## Scope
 
 - `config/` contains the shipped Klipper, Moonraker, Fluidd, macro, box, and preset configuration files.
