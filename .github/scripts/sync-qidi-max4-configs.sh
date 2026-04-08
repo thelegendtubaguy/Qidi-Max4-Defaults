@@ -80,9 +80,13 @@ if [ ! -d "$SOURCE_CONFIG_DIR" ]; then
 fi
 
 rsync -a --delete \
+  --exclude 'KAMP/' \
   --exclude 'MCU_ID.cfg' \
   --exclude 'saved_variables.cfg' \
+  --exclude 'fluidd.cfg' \
   "$SOURCE_CONFIG_DIR"/ "$DEST_CONFIG_DIR"/
+
+rm -f "$DEST_CONFIG_DIR/saved_variables.cfg.bak"
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
@@ -91,6 +95,6 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     printf -- '- Source package: `%s`\n' "$(basename "$PACKAGE_ZIP")"
     printf -- '- SOC payload: `%s`\n' "$SOC_PACKAGE_NAME"
     printf -- '- Synced directory: `%s`\n' "$DEST_CONFIG_DIR"
-    echo "- Preserved repo-only files: \`MCU_ID.cfg\`, \`saved_variables.cfg\`"
+    echo "- Preserved repo-only paths: \`KAMP/\`, \`MCU_ID.cfg\`, \`saved_variables.cfg\`, \`fluidd.cfg\`"
   } >> "$GITHUB_STEP_SUMMARY"
 fi

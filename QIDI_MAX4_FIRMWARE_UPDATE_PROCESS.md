@@ -1,6 +1,6 @@
 # QIDI Max 4 Firmware Update Format and Install Flow
 
-This note is based on local inspection of `QD_MAX4_01.01.06.02_20260407_Release.zip`.
+This note is based on local inspection of `QD_MAX4_01.01.06.02_20260407_Release.zip` and on observed behavior from a printer that ran the update.
 
 ## Archive Layout
 
@@ -37,7 +37,7 @@ Observed paths and strings in `qidiclient` indicate this flow:
 4. The client extracts the selected zip into `/home/qidi/update/`.
 5. The client reads `/home/qidi/update/firmware_manifest.json`.
 6. The client validates which components are present and which ones need updating.
-7. The client installs the SOC package with `dpkg -i --force-overwrite`.
+7. When the SOC portion is applied, the client appears to install the SOC package with `dpkg -i --force-overwrite`.
 8. The client updates THR, BOX, MCU, and closed-loop motor firmware through separate device-specific flows.
 
 The client binary also references a mandatory-offline path at `/home/qidi/printer_data/gcodes/USB/QD_Update/QD_Mandatory_Update.zip`.
@@ -91,9 +91,9 @@ It:
 - clears `/tmp`
 - stops `algo_app.service` if it is running
 
-## How Config Replacement Works
+## How Config Replacement Appears to Work
 
-The config update is not a merge.
+The extracted SOC package is not doing a merge.
 
 `preinst` walks `/home/qidi/printer_data/config`, removes every file whose basename is not in the keep list, then removes empty directories.
 
@@ -114,7 +114,28 @@ Important details:
 - `timelapse.cfg` is in the keep list, but the package also ships a new `timelapse.cfg`, so it still gets overwritten by package extraction.
 - `MCU_ID.cfg` and `saved_variables.cfg` survive because the package does not ship replacements for them.
 
-In practice, this means the update behaves like a replace-and-preserve process, not a three-way merge.
+From the package scripts alone, this looks like a replace-and-preserve process, not a three-way merge.
+
+## Observed On-Printer Behavior
+
+At least one printer that ran this update did **not** match the most destructive interpretation of the extracted `preinst` script.
+
+Observed result:
+
+- `config/KAMP/` was still present after the update.
+- The modification times on files inside `KAMP/` did not change.
+
+That means at least one of these must be true:
+
+- the client used an incremental path that did not run the full SOC cleanup path
+- the client decided the SOC/config portion did not need to be applied
+- the real on-printer install flow differs from a plain `dpkg -i` execution of the extracted package
+
+So the safest conclusion is:
+
+- the extracted package contains destructive cleanup logic
+- the real update path on a printer may be more selective than those scripts imply
+- package inspection alone is not enough to prove that every extra file under `printer_data/config` is deleted during a real update
 
 ## What the Installer Does After Unpacking
 
@@ -160,9 +181,13 @@ The inspected `preinst` and `postinst` scripts touch at least these paths:
 
 For this repo, the most useful part of the package is the extracted `/home/qidi/printer_data/config` tree.
 
-The GitHub Actions workflow now extracts that tree from the SOC Debian payload before publishing a firmware release. It syncs the repo's `config/` directory to match the shipped package and preserves only these repo-only files:
+The GitHub Actions workflow extracts that tree from the SOC Debian payload before publishing a firmware release. It updates the repo's shipped config files from the package while preserving a small set of repo-local paths:
 
+- `config/KAMP/`
 - `config/MCU_ID.cfg`
 - `config/saved_variables.cfg`
+- `config/fluidd.cfg`
 
-That keeps the repo aligned with QIDI's shipped configs while preserving the redacted machine identifier include and the existing saved-variables reference file.
+The repo intentionally does not track `config/saved_variables.cfg.bak`, even though the package ships it and the printer uses it during install.
+
+That keeps the repo aligned with the package contents while preserving the redacted machine identifier include, the saved-variables reference file, the existing Fluidd config, and the repo's `KAMP/` directory.
