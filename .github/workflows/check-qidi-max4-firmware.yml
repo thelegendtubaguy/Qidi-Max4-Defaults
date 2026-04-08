@@ -27,7 +27,7 @@ jobs:
       contents: read
     outputs:
       need_update: ${{ steps.parse.outputs.need_update }}
-      current_version: ${{ steps.settings.outputs.current_version }}
+      current_version: ${{ steps.current_version.outputs.current_version }}
       version: ${{ steps.parse.outputs.version }}
       url: ${{ steps.parse.outputs.url }}
       description: ${{ steps.parse.outputs.description }}
@@ -43,7 +43,7 @@ jobs:
         id: settings
         run: |
           SETTINGS_FILE=".github/qidi_max4_firmware_check.json"
-          CURRENT_VERSION=$(jq -r '.current_version' "$SETTINGS_FILE")
+          DEFAULT_CURRENT_VERSION=$(jq -r '.current_version' "$SETTINGS_FILE")
           HARDWARE=$(jq -r '.hardware' "$SETTINGS_FILE")
           DEVICE_TYPE=$(jq -r '.device_type' "$SETTINGS_FILE")
           REGION=$(jq -r '.region' "$SETTINGS_FILE")
@@ -53,11 +53,7 @@ jobs:
           PLATFORM=$(jq -r '.platform' "$SETTINGS_FILE")
           USER_AGENT=$(jq -r '.user_agent' "$SETTINGS_FILE")
 
-          if [ -n "${{ inputs.current_version }}" ]; then
-            CURRENT_VERSION="${{ inputs.current_version }}"
-          fi
-
-          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "default_current_version=$DEFAULT_CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "hardware=$HARDWARE" >> "$GITHUB_OUTPUT"
           echo "device_type=$DEVICE_TYPE" >> "$GITHUB_OUTPUT"
           echo "region=$REGION" >> "$GITHUB_OUTPUT"
@@ -66,6 +62,74 @@ jobs:
           echo "timezone=$TIMEZONE" >> "$GITHUB_OUTPUT"
           echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "user_agent=$USER_AGENT" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve current version baseline
+        id: current_version
+        uses: actions/github-script@v8
+        env:
+          DEFAULT_CURRENT_VERSION: ${{ steps.settings.outputs.default_current_version }}
+          INPUT_CURRENT_VERSION: ${{ inputs.current_version }}
+          RELEASE_TAG_PREFIX: qidi-max4-firmware-
+        with:
+          script: |
+            const inputVersion = process.env.INPUT_CURRENT_VERSION?.trim();
+            if (inputVersion) {
+              core.setOutput('current_version', inputVersion);
+              core.setOutput('source', 'workflow_dispatch');
+              return;
+            }
+
+            const configuredVersion = process.env.DEFAULT_CURRENT_VERSION?.trim();
+            const prefix = process.env.RELEASE_TAG_PREFIX;
+
+            const compareVersions = (left, right) => {
+              const leftParts = left.split('.').map((part) => Number.parseInt(part, 10) || 0);
+              const rightParts = right.split('.').map((part) => Number.parseInt(part, 10) || 0);
+              const length = Math.max(leftParts.length, rightParts.length);
+
+              for (let index = 0; index < length; index += 1) {
+                const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+                if (difference !== 0) {
+                  return difference;
+                }
+              }
+
+              return 0;
+            };
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+
+            let latestReleaseVersion = '';
+            for (const release of releases) {
+              if (!release.tag_name?.startsWith(prefix)) {
+                continue;
+              }
+
+              const version = release.tag_name.slice(prefix.length);
+              if (!latestReleaseVersion || compareVersions(version, latestReleaseVersion) > 0) {
+                latestReleaseVersion = version;
+              }
+            }
+
+            let resolvedVersion = configuredVersion;
+            let source = 'settings';
+
+            if (latestReleaseVersion && (!configuredVersion || compareVersions(latestReleaseVersion, configuredVersion) > 0)) {
+              resolvedVersion = latestReleaseVersion;
+              source = 'latest_release';
+            }
+
+            if (!resolvedVersion) {
+              core.setFailed('Unable to determine current firmware version');
+              return;
+            }
+
+            core.setOutput('current_version', resolvedVersion);
+            core.setOutput('source', source);
 
       - name: Query firmware endpoint
         id: query
@@ -98,7 +162,7 @@ jobs:
 
           curl -sS --get "$API_URL" \
             --data-urlencode "hardware=${{ steps.settings.outputs.hardware }}" \
-            --data-urlencode "currentVersion=${{ steps.settings.outputs.current_version }}" \
+            --data-urlencode "currentVersion=${{ steps.current_version.outputs.current_version }}" \
             --data-urlencode "deviceId=${QIDI_MAX4_DEVICE_ID}" \
             -H "User-Agent: ${{ steps.settings.outputs.user_agent }}" \
             -H "Accept: */*" \
@@ -160,11 +224,11 @@ jobs:
           {
             echo "## QIDI Max 4 Firmware Check"
             echo ""
-            echo "- Current version: `${{ steps.settings.outputs.current_version }}`"
-            echo "- Update available: `$NEED_UPDATE`"
-            echo "- Available version: `$VERSION`"
-            echo "- Forced update: `$IS_FORCE`"
-            echo "- Package size: `$APK_SIZE`"
+            printf -- '- Current version: `%s`\n' "${{ steps.current_version.outputs.current_version }}"
+            printf -- '- Update available: `%s`\n' "$NEED_UPDATE"
+            printf -- '- Available version: `%s`\n' "$VERSION"
+            printf -- '- Forced update: `%s`\n' "$IS_FORCE"
+            printf -- '- Package size: `%s`\n' "$APK_SIZE"
             echo "- Release notes: $DESCRIPTION"
             echo "- Package URL: $URL"
           } >> "$GITHUB_STEP_SUMMARY"
