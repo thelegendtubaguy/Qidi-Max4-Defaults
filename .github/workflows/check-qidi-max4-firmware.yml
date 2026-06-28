@@ -160,7 +160,15 @@ jobs:
           NONCE=$(openssl rand -hex 16)
           API_URL="https://api.qidimaker.com/backend/v1/fireware/upgrade-info"
 
-          curl -sS --get "$API_URL" \
+          set +e
+          HTTP_STATUS=$(curl -sS --get "$API_URL" \
+            --retry 4 \
+            --retry-all-errors \
+            --retry-delay 15 \
+            --connect-timeout 15 \
+            --max-time 90 \
+            --write-out '%{http_code}' \
+            --output qidi-max4-update-response.json \
             --data-urlencode "hardware=${{ steps.settings.outputs.hardware }}" \
             --data-urlencode "currentVersion=${{ steps.current_version.outputs.current_version }}" \
             --data-urlencode "deviceId=${QIDI_MAX4_DEVICE_ID}" \
@@ -176,8 +184,13 @@ jobs:
             -H "X-Signature: ${QIDI_MAX4_SIGNATURE}" \
             -H "X-Timestamp: ${TS}" \
             -H "X-Timezone: ${{ steps.settings.outputs.timezone }}" \
-            -H "X-Version: ${{ steps.settings.outputs.version_header }}" \
-            > qidi-max4-update-response.json
+            -H "X-Version: ${{ steps.settings.outputs.version_header }}")
+          CURL_STATUS=$?
+          set -e
+
+          if [ ! -f qidi-max4-update-response.json ]; then
+            : > qidi-max4-update-response.json
+          fi
 
           QIDI_MAX4_DEVICE_ID="$QIDI_MAX4_DEVICE_ID" QIDI_MAX4_SIGNATURE="$QIDI_MAX4_SIGNATURE" \
             perl -0pe 's/\Q$ENV{QIDI_MAX4_DEVICE_ID}\E/[REDACTED_DEVICE_ID]/g; s/\Q$ENV{QIDI_MAX4_SIGNATURE}\E/[REDACTED_SIGNATURE]/g' \
@@ -186,14 +199,48 @@ jobs:
           unset QIDI_MAX4_DEVICE_ID
           unset QIDI_MAX4_SIGNATURE
 
+          echo "http_status=$HTTP_STATUS" >> "$GITHUB_OUTPUT"
+          echo "curl_status=$CURL_STATUS" >> "$GITHUB_OUTPUT"
+
       - name: Parse response
         id: parse
+        env:
+          CURL_STATUS: ${{ steps.query.outputs.curl_status }}
+          HTTP_STATUS: ${{ steps.query.outputs.http_status }}
         run: |
-          if ! CODE=$(jq -r '.code // empty' qidi-max4-update-response.json); then
+          skip_transient() {
+            local reason="$1"
+            echo "::warning::$reason"
+            echo "need_update=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## QIDI Max 4 Firmware Check"
+              echo ""
+              printf -- '- Current version: `%s`\n' "${{ steps.current_version.outputs.current_version }}"
+              echo "- Result: transient endpoint failure, skipped this scheduled check"
+              printf -- '- HTTP status: `%s`\n' "${HTTP_STATUS:-unknown}"
+              printf -- '- curl status: `%s`\n' "${CURL_STATUS:-unknown}"
+              echo "- Reason: $reason"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ "${CURL_STATUS:-0}" != "0" ]; then
+            skip_transient "curl failed while querying QIDI firmware endpoint"
+            exit 0
+          fi
+
+          case "${HTTP_STATUS:-000}" in
+            408|429|5??|000)
+              skip_transient "QIDI firmware endpoint returned transient HTTP status ${HTTP_STATUS:-unknown}"
+              exit 0
+              ;;
+          esac
+
+          if ! jq -e . qidi-max4-update-response.json > /dev/null; then
             echo "Firmware endpoint response was not valid JSON" >&2
             exit 1
           fi
 
+          CODE=$(jq -r '.code // empty' qidi-max4-update-response.json)
           MESSAGE=$(jq -r '.message // empty' qidi-max4-update-response.json)
           if [ "$CODE" != "200" ]; then
             echo "Unexpected API response code: ${CODE:-unknown}" >&2
@@ -203,12 +250,22 @@ jobs:
             exit 1
           fi
 
+          if ! jq -e '(.data | type == "object") and (.data.needUpdate | type == "boolean")' qidi-max4-update-response.json > /dev/null; then
+            echo "Firmware endpoint JSON did not match expected schema" >&2
+            exit 1
+          fi
+
           NEED_UPDATE=$(jq -r '.data.needUpdate' qidi-max4-update-response.json)
-          VERSION=$(jq -r '.data.version' qidi-max4-update-response.json)
-          URL=$(jq -r '.data.url' qidi-max4-update-response.json)
-          DESCRIPTION=$(jq -r '.data.description' qidi-max4-update-response.json)
-          APK_SIZE=$(jq -r '.data.apkSize' qidi-max4-update-response.json)
-          IS_FORCE=$(jq -r '.data.isForce' qidi-max4-update-response.json)
+          VERSION=$(jq -r '.data.version // empty' qidi-max4-update-response.json)
+          URL=$(jq -r '.data.url // empty' qidi-max4-update-response.json)
+          DESCRIPTION=$(jq -r '.data.description // empty' qidi-max4-update-response.json)
+          APK_SIZE=$(jq -r '.data.apkSize // empty' qidi-max4-update-response.json)
+          IS_FORCE=$(jq -r '.data.isForce // empty' qidi-max4-update-response.json)
+
+          if [ "$NEED_UPDATE" = "true" ] && { [ -z "$VERSION" ] || [ -z "$URL" ]; }; then
+            echo "Firmware endpoint reported an update without required version/url fields" >&2
+            exit 1
+          fi
 
           echo "need_update=$NEED_UPDATE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
