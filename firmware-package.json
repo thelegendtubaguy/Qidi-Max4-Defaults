@@ -2,7 +2,7 @@
   "schema_version": 1,
   "soc_version": "01.01.06.04",
   "firmware_archive": {
-    "filename": "QD_MAX4_01.01.06.04_20260612_Release_NA.zip",
+    "filename": "QD_MAX4_01.01.06.04_20260612_Release.zip",
     "sha256": "62357353ac0523f05d4173fefcdd39ae63540cd17047920a68795396ae24b280"
   },
   "firmware_manifest": {
