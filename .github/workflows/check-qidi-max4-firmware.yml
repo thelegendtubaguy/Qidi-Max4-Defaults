@@ -6,19 +6,23 @@ on:
   workflow_dispatch:
     inputs:
       current_version:
-        description: "Override current firmware version"
+        description: "Override firmware endpoint comparison version"
         required: false
         type: string
       download_package:
-        description: "Download package when update is available"
+        description: "Force package download when the endpoint reports an update"
         required: false
         default: false
         type: boolean
       publish_release:
-        description: "Create a GitHub release when update is available"
+        description: "Force package sync and release when the endpoint reports an update"
         required: false
         default: false
         type: boolean
+
+concurrency:
+  group: qidi-max4-firmware-sync
+  cancel-in-progress: false
 
 jobs:
   check-firmware:
@@ -33,8 +37,8 @@ jobs:
       description: ${{ steps.parse.outputs.description }}
       apk_size: ${{ steps.parse.outputs.apk_size }}
       is_force: ${{ steps.parse.outputs.is_force }}
-      release_tag: ${{ steps.release_meta.outputs.release_tag }}
-      release_exists: ${{ steps.release_check.outputs.exists }}
+      package_filename: ${{ steps.parse.outputs.package_filename }}
+      package_candidate_changed: ${{ steps.parse.outputs.package_candidate_changed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -63,73 +67,19 @@ jobs:
           echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "user_agent=$USER_AGENT" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve current version baseline
+      - name: Resolve firmware endpoint comparison version
         id: current_version
-        uses: actions/github-script@v8
         env:
           DEFAULT_CURRENT_VERSION: ${{ steps.settings.outputs.default_current_version }}
           INPUT_CURRENT_VERSION: ${{ inputs.current_version }}
-          RELEASE_TAG_PREFIX: qidi-max4-firmware-
-        with:
-          script: |
-            const inputVersion = process.env.INPUT_CURRENT_VERSION?.trim();
-            if (inputVersion) {
-              core.setOutput('current_version', inputVersion);
-              core.setOutput('source', 'workflow_dispatch');
-              return;
-            }
+        run: |
+          CURRENT_VERSION=${INPUT_CURRENT_VERSION:-$DEFAULT_CURRENT_VERSION}
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "Unable to determine firmware endpoint comparison version" >&2
+            exit 1
+          fi
 
-            const configuredVersion = process.env.DEFAULT_CURRENT_VERSION?.trim();
-            const prefix = process.env.RELEASE_TAG_PREFIX;
-
-            const compareVersions = (left, right) => {
-              const leftParts = left.split('.').map((part) => Number.parseInt(part, 10) || 0);
-              const rightParts = right.split('.').map((part) => Number.parseInt(part, 10) || 0);
-              const length = Math.max(leftParts.length, rightParts.length);
-
-              for (let index = 0; index < length; index += 1) {
-                const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
-                if (difference !== 0) {
-                  return difference;
-                }
-              }
-
-              return 0;
-            };
-
-            const releases = await github.paginate(github.rest.repos.listReleases, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              per_page: 100,
-            });
-
-            let latestReleaseVersion = '';
-            for (const release of releases) {
-              if (!release.tag_name?.startsWith(prefix)) {
-                continue;
-              }
-
-              const version = release.tag_name.slice(prefix.length);
-              if (!latestReleaseVersion || compareVersions(version, latestReleaseVersion) > 0) {
-                latestReleaseVersion = version;
-              }
-            }
-
-            let resolvedVersion = configuredVersion;
-            let source = 'settings';
-
-            if (latestReleaseVersion && (!configuredVersion || compareVersions(latestReleaseVersion, configuredVersion) > 0)) {
-              resolvedVersion = latestReleaseVersion;
-              source = 'latest_release';
-            }
-
-            if (!resolvedVersion) {
-              core.setFailed('Unable to determine current firmware version');
-              return;
-            }
-
-            core.setOutput('current_version', resolvedVersion);
-            core.setOutput('source', source);
+          echo "current_version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Query firmware endpoint
         id: query
@@ -212,6 +162,7 @@ jobs:
             local reason="$1"
             echo "::warning::$reason"
             echo "need_update=false" >> "$GITHUB_OUTPUT"
+            echo "package_candidate_changed=false" >> "$GITHUB_OUTPUT"
             {
               echo "## QIDI Max 4 Firmware Check"
               echo ""
@@ -267,11 +218,23 @@ jobs:
             exit 1
           fi
 
+          PACKAGE_FILENAME=""
+          PACKAGE_CANDIDATE_CHANGED=false
+          if [ "$NEED_UPDATE" = "true" ]; then
+            PACKAGE_FILENAME=$(basename "${URL%%\?*}")
+            TRACKED_PACKAGE_FILENAME=$(jq -r '.firmware_archive.filename // empty' firmware-package.json 2>/dev/null || true)
+            if [ "$PACKAGE_FILENAME" != "$TRACKED_PACKAGE_FILENAME" ]; then
+              PACKAGE_CANDIDATE_CHANGED=true
+            fi
+          fi
+
           echo "need_update=$NEED_UPDATE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "apk_size=$APK_SIZE" >> "$GITHUB_OUTPUT"
           echo "is_force=$IS_FORCE" >> "$GITHUB_OUTPUT"
+          echo "package_filename=$PACKAGE_FILENAME" >> "$GITHUB_OUTPUT"
+          echo "package_candidate_changed=$PACKAGE_CANDIDATE_CHANGED" >> "$GITHUB_OUTPUT"
           {
             echo "description<<EOF"
             echo "$DESCRIPTION"
@@ -281,53 +244,16 @@ jobs:
           {
             echo "## QIDI Max 4 Firmware Check"
             echo ""
-            printf -- '- Current version: `%s`\n' "${{ steps.current_version.outputs.current_version }}"
+            printf -- '- Endpoint comparison version: `%s`\n' "${{ steps.current_version.outputs.current_version }}"
             printf -- '- Update available: `%s`\n' "$NEED_UPDATE"
-            printf -- '- Available version: `%s`\n' "$VERSION"
+            printf -- '- Available SOC version: `%s`\n' "$VERSION"
+            printf -- '- Package filename: `%s`\n' "$PACKAGE_FILENAME"
+            printf -- '- Package candidate changed: `%s`\n' "$PACKAGE_CANDIDATE_CHANGED"
             printf -- '- Forced update: `%s`\n' "$IS_FORCE"
             printf -- '- Package size: `%s`\n' "$APK_SIZE"
             echo "- Release notes: $DESCRIPTION"
             echo "- Package URL: $URL"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Prepare release metadata
-        id: release_meta
-        run: |
-          RELEASE_TAG=""
-          if [ "${{ steps.parse.outputs.need_update }}" = "true" ] && [ -n "${{ steps.parse.outputs.version }}" ] && [ "${{ steps.parse.outputs.version }}" != "null" ]; then
-            RELEASE_TAG="qidi-max4-firmware-${{ steps.parse.outputs.version }}"
-          fi
-
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Check for existing release
-        id: release_check
-        uses: actions/github-script@v8
-        env:
-          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
-        with:
-          script: |
-            const tag = process.env.RELEASE_TAG;
-            if (!tag) {
-              core.setOutput('exists', 'false');
-              return;
-            }
-
-            try {
-              await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag,
-              });
-              core.setOutput('exists', 'true');
-            } catch (error) {
-              if (error.status === 404) {
-                core.setOutput('exists', 'false');
-                return;
-              }
-
-              throw error;
-            }
 
       - name: Upload sanitized response
         if: always()
@@ -340,11 +266,15 @@ jobs:
   download-package:
     runs-on: ubuntu-latest
     needs: check-firmware
-    if: needs.check-firmware.outputs.need_update == 'true' && needs.check-firmware.outputs.release_exists != 'true' && (github.event_name == 'schedule' || inputs.download_package == true || inputs.publish_release == true)
+    if: needs.check-firmware.outputs.need_update == 'true' && (needs.check-firmware.outputs.package_candidate_changed == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.download_package == true || inputs.publish_release == true)))
     permissions:
       contents: read
+    outputs:
+      package_filename: ${{ steps.download.outputs.package_filename }}
+      archive_sha256: ${{ steps.download.outputs.archive_sha256 }}
     steps:
       - name: Download package
+        id: download
         run: |
           PACKAGE_URL="${{ needs.check-firmware.outputs.url }}"
           # Preserve the vendor filename exactly as published by QIDI.
@@ -354,8 +284,11 @@ jobs:
           mkdir -p "$PACKAGE_DIR"
 
           wget -O "$PACKAGE_DIR/$PACKAGE_NAME" "$PACKAGE_URL"
-          sha256sum "$PACKAGE_DIR/$PACKAGE_NAME" | tee "$PACKAGE_DIR/$PACKAGE_NAME.sha256"
+          ARCHIVE_SHA256=$(sha256sum "$PACKAGE_DIR/$PACKAGE_NAME" | tee "$PACKAGE_DIR/$PACKAGE_NAME.sha256" | awk '{print $1}')
           file "$PACKAGE_DIR/$PACKAGE_NAME" | tee "$PACKAGE_DIR/$PACKAGE_NAME.file.txt"
+
+          echo "package_filename=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "archive_sha256=$ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Inspect archive contents
         run: |
@@ -377,7 +310,7 @@ jobs:
     needs:
       - check-firmware
       - download-package
-    if: needs.check-firmware.outputs.need_update == 'true' && needs.check-firmware.outputs.release_exists != 'true' && (github.event_name == 'schedule' || inputs.publish_release == true)
+    if: always() && needs.download-package.result == 'success' && (github.event_name == 'schedule' || inputs.publish_release == true)
     permissions:
       contents: write
     outputs:
@@ -396,7 +329,7 @@ jobs:
           name: qidi-max4-firmware-package
           path: sync-assets/package-artifacts
 
-      - name: Sync shipped configs from firmware package
+      - name: Sync package-owned firmware files
         run: |
           PACKAGE_ZIP=$(find sync-assets/package-artifacts -maxdepth 1 -type f -name '*.zip' | sort | head -n 1)
           if [ -z "$PACKAGE_ZIP" ]; then
@@ -404,22 +337,22 @@ jobs:
             exit 1
           fi
 
-          bash .github/scripts/sync-qidi-max4-configs.sh "$PACKAGE_ZIP" config
+          bash .github/scripts/sync-qidi-max4-configs.sh "$PACKAGE_ZIP" .
 
-      - name: Commit synced configs
+      - name: Commit synced package contents
         id: commit
         env:
           FIRMWARE_VERSION: ${{ needs.check-firmware.outputs.version }}
         run: |
-          if [ -z "$(git status --short -- config)" ]; then
+          if ! bash .github/scripts/has-qidi-max4-sync-changes.sh; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          git add -A config
+          git add -A -- config klipper/klippy firmware-package.json
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "Update shipped configs for QIDI Max 4 firmware ${FIRMWARE_VERSION}"
+            commit -m "Update package-owned files for QIDI Max 4 firmware ${FIRMWARE_VERSION}"
           git pull --rebase origin "${GITHUB_REF_NAME}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
@@ -432,10 +365,15 @@ jobs:
       - check-firmware
       - download-package
       - sync-configs
-    if: needs.check-firmware.outputs.need_update == 'true' && needs.check-firmware.outputs.release_exists != 'true' && (github.event_name == 'schedule' || inputs.publish_release == true)
+    if: always() && needs.sync-configs.result == 'success' && (github.event_name == 'schedule' || inputs.publish_release == true)
     permissions:
       contents: write
     steps:
+      - name: Checkout synced repository state
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.sync-configs.outputs.commit_sha }}
+
       - name: Download package artifact
         uses: actions/download-artifact@v8
         with:
@@ -445,17 +383,19 @@ jobs:
       - name: Create GitHub release
         uses: actions/github-script@v8
         env:
-          RELEASE_TAG: ${{ needs.check-firmware.outputs.release_tag }}
+          RELEASE_TAG: qidi-max4-firmware-${{ needs.check-firmware.outputs.version }}-${{ needs.download-package.outputs.archive_sha256 }}
           RELEASE_NAME: QIDI Max 4 Firmware ${{ needs.check-firmware.outputs.version }}
-          CURRENT_VERSION: ${{ needs.check-firmware.outputs.current_version }}
+          ENDPOINT_COMPARISON_VERSION: ${{ needs.check-firmware.outputs.current_version }}
           AVAILABLE_VERSION: ${{ needs.check-firmware.outputs.version }}
+          ARCHIVE_SHA256: ${{ needs.download-package.outputs.archive_sha256 }}
           IS_FORCE: ${{ needs.check-firmware.outputs.is_force }}
           APK_SIZE: ${{ needs.check-firmware.outputs.apk_size }}
           DESCRIPTION_URL: ${{ needs.check-firmware.outputs.description }}
           PACKAGE_URL: ${{ needs.check-firmware.outputs.url }}
-          CONFIG_SYNC_CHANGED: ${{ needs.sync-configs.outputs.changed }}
+          PACKAGE_SYNC_CHANGED: ${{ needs.sync-configs.outputs.changed }}
           TARGET_COMMITISH: ${{ needs.sync-configs.outputs.commit_sha }}
           ASSET_DIR: release-assets/package-artifacts
+          PACKAGE_IDENTITY_FILE: firmware-package.json
         with:
           script: |
             const fs = require('fs');
@@ -464,6 +404,26 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const assetDir = process.env.ASSET_DIR;
+            const identity = JSON.parse(fs.readFileSync(process.env.PACKAGE_IDENTITY_FILE, 'utf8'));
+
+            if (identity.firmware_archive.sha256 !== process.env.ARCHIVE_SHA256) {
+              core.setFailed('Checked-in package identity does not match the downloaded archive');
+              return;
+            }
+
+            try {
+              await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: process.env.RELEASE_TAG,
+              });
+              core.notice(`Release ${process.env.RELEASE_TAG} already exists`);
+              return;
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+            }
 
             const assetFiles = fs.readdirSync(assetDir)
               .map((name) => path.join(assetDir, name))
@@ -485,11 +445,15 @@ jobs:
 
             const releaseBody = [
               '## Package Metadata',
-              `- Source current version: \`${process.env.CURRENT_VERSION}\``,
-              `- Available version: \`${process.env.AVAILABLE_VERSION}\``,
+              `- Endpoint comparison version: \`${process.env.ENDPOINT_COMPARISON_VERSION}\``,
+              `- Available SOC version: \`${process.env.AVAILABLE_VERSION}\``,
+              `- Firmware archive: \`${identity.firmware_archive.filename}\``,
+              `- Firmware archive SHA-256: \`${identity.firmware_archive.sha256}\``,
+              `- SOC payload: \`${identity.soc_payload.filename}\``,
+              `- SOC payload SHA-256: \`${identity.soc_payload.sha256}\``,
               `- Forced update: \`${process.env.IS_FORCE}\``,
               `- Package size: \`${process.env.APK_SIZE}\``,
-              `- Repo config sync changed files: \`${process.env.CONFIG_SYNC_CHANGED || 'false'}\``,
+              `- Repo package sync changed files: \`${process.env.PACKAGE_SYNC_CHANGED || 'false'}\``,
               `- Release commit: \`${process.env.TARGET_COMMITISH || context.sha}\``,
               `- Release notes URL: ${process.env.DESCRIPTION_URL}`,
               `- Original QIDI package URL: ${process.env.PACKAGE_URL}`,
@@ -508,7 +472,7 @@ jobs:
               repo,
               tag_name: process.env.RELEASE_TAG,
               target_commitish: process.env.TARGET_COMMITISH || context.sha,
-              name: process.env.RELEASE_NAME,
+              name: `${process.env.RELEASE_NAME} (${process.env.ARCHIVE_SHA256.slice(0, 12)})`,
               body: releaseBody,
               draft: false,
               prerelease: false,
