@@ -1,6 +1,6 @@
 # QIDI Max 4 Firmware Update Format and Install Flow
 
-This note is based on local inspection of `QD_MAX4_01.01.06.02_20260407_Release.zip` and on observed behavior from a printer that ran the update.
+Package details are based on inspection of `QD_MAX4_01.01.06.02_20260407_Release.zip`; install behavior includes observations from a printer that ran the update.
 
 ## Archive Layout
 
@@ -177,17 +177,44 @@ The inspected `preinst` and `postinst` scripts touch at least these paths:
 - `/dev_info.txt`
 - `/home/qidi/iso_version.txt`
 
-## Repo Sync Implications
+## Repository Synchronization
 
-For this repo, the most useful part of the package is the extracted `/home/qidi/printer_data/config` tree.
+`.github/scripts/sync-qidi-max4-configs.sh` extracts one firmware ZIP and its SOC Debian payload, validates both source directories, and updates these paths in one invocation:
 
-The GitHub Actions workflow extracts that tree from the SOC Debian payload before publishing a firmware release. It updates the repo's shipped config files from the package while preserving a small set of repo-local paths:
+- `/home/qidi/printer_data/config/` to `config/`
+- `/home/qidi/klipper/klippy/` to `klipper/klippy/`
+- package identity to `firmware-package.json`
+
+`config/` uses `rsync --delete` while preserving these repository-owned paths:
 
 - `config/KAMP/`
 - `config/MCU_ID.cfg`
 - `config/saved_variables.cfg`
 - `config/fluidd.cfg`
 
-The repo intentionally does not track `config/saved_variables.cfg.bak`, even though the package ships it and the printer uses it during install.
+`config/saved_variables.cfg.bak` is deleted after synchronization. `config/MCU_ID.cfg` is never restored from the package, so the checked-in redacted identifier remains unchanged.
 
-That keeps the repo aligned with the package contents while preserving the redacted machine identifier include, the saved-variables reference file, the existing Fluidd config, and the repo's `KAMP/` directory.
+`klipper/klippy/` uses `rsync --delete` with no file exclusions. Python files, config files, C sources, headers, and shared objects are tracked byte-for-byte; removed package files are removed from the repository mirror.
+
+`firmware-package.json` records:
+
+- SOC version
+- original firmware archive filename and SHA-256
+- firmware manifest SHA-256
+- SOC payload filename, SHA-256, and region
+
+The firmware archive SHA-256 is the package revision identity. SOC version `01.01.06.04` is shared by at least two different packages, so SOC-version-only tags and release checks cannot identify package content.
+
+The checked-in `01.01.06.04` baseline comes from `QD_MAX4_01.01.06.04_20260612_Release_NA.zip`:
+
+- Firmware archive SHA-256: `62357353ac0523f05d4173fefcdd39ae63540cd17047920a68795396ae24b280`
+- SOC payload: `QD_MAX4_SOC_01.01.06.04_20260612_Release_NA`
+- SOC payload SHA-256: `21d98cd65638cdda1e4947eb37ac02dc12a0ef1f06b64e121cc494fcf71a14cd`
+
+The earlier `QD_MAX4_01.01.06.04_20260609_Release.zip` has archive SHA-256 `8477e202e81c912a26f091f5e0a467a42e936f4f6bb33a3649a27f9190e840b1` and SOC payload SHA-256 `75fcc3a9729d93c6be90908c0e7014d1319a0a8e0f224418257894f423720035` despite reporting the same SOC version.
+
+`.github/workflows/check-qidi-max4-firmware.yml` uses the configured endpoint comparison version instead of deriving it from release tags. The endpoint archive filename is compared with `firmware-package.json`; a new filename is downloaded, hashed, synchronized, committed, and released under a digest-qualified tag.
+
+The endpoint cannot prove that bytes at an unchanged archive URL or filename were replaced. `workflow_dispatch` with `download_package` or `publish_release` forces a download when the endpoint reports an update, but automatic detection still depends on the endpoint returning that package for the configured comparison version.
+
+`tests/test-sync-qidi-max4-configs.sh` builds synthetic firmware ZIP and Debian fixtures and validates config preservation, identifier redaction, deterministic Klippy mirroring and deletion, paired `homing.py`/`mcu.py` updates, shared-object preservation, package identity, and Klippy-only workflow change detection.
