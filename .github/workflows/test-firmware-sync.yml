@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/scripts/has-qidi-max4-sync-changes.sh"
+      - ".github/scripts/reconcile-qidi-max4-line-endings.py"
       - ".github/scripts/sync-qidi-max4-configs.sh"
       - ".github/workflows/check-qidi-max4-firmware.yml"
       - ".github/workflows/test-firmware-sync.yml"
@@ -13,6 +14,7 @@ on:
       - main
     paths:
       - ".github/scripts/has-qidi-max4-sync-changes.sh"
+      - ".github/scripts/reconcile-qidi-max4-line-endings.py"
       - ".github/scripts/sync-qidi-max4-configs.sh"
       - ".github/workflows/check-qidi-max4-firmware.yml"
       - ".github/workflows/test-firmware-sync.yml"

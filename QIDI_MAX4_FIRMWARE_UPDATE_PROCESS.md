@@ -194,7 +194,7 @@ The inspected `preinst` and `postinst` scripts touch at least these paths:
 
 `config/saved_variables.cfg.bak` is deleted after synchronization. `config/MCU_ID.cfg` is never restored from the package, so the checked-in redacted identifier remains unchanged.
 
-`klipper/klippy/` uses `rsync --delete` with no file exclusions. Python files, config files, C sources, headers, and shared objects are tracked byte-for-byte; removed package files are removed from the repository mirror.
+`klipper/klippy/` uses `rsync --delete` with no file exclusions. Before synchronization, `.github/scripts/reconcile-qidi-max4-line-endings.py` compares `.py`, `.cfg`, `.conf`, `.c`, `.h`, and `.json` files after treating LF and CRLF as equivalent. Line-ending-only package changes retain the checked-in bytes, including changes between mixed and consistent LF/CRLF forms. Substantive text changes retain the checked-in file's consistent LF or CRLF convention. New files, substantively changed mixed-ending files, unrecognized file types, and shared objects retain package bytes. Removed package files are removed from the repository mirror.
 
 `firmware-package.json` records:
 
@@ -217,4 +217,4 @@ The earlier `QD_MAX4_01.01.06.04_20260609_Release.zip` has archive SHA-256 `8477
 
 The endpoint cannot prove that bytes at an unchanged archive URL or filename were replaced. `workflow_dispatch` with `download_package` or `publish_release` forces a download when the endpoint reports an update, but automatic detection still depends on the endpoint returning that package for the configured comparison version.
 
-`tests/test-sync-qidi-max4-configs.sh` builds synthetic firmware ZIP and Debian fixtures and validates config preservation, identifier redaction, deterministic Klippy mirroring and deletion, paired `homing.py`/`mcu.py` updates, shared-object preservation, package identity, and Klippy-only workflow change detection.
+`tests/test-sync-qidi-max4-configs.sh` builds synthetic firmware ZIP and Debian fixtures and validates config preservation, identifier redaction, deterministic Klippy mirroring and deletion, LF/CRLF reconciliation, paired `homing.py`/`mcu.py` updates, shared-object preservation, package identity, and Klippy-only workflow change detection.

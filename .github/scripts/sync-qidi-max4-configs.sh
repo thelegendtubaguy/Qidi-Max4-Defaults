@@ -8,6 +8,8 @@ fi
 
 PACKAGE_ZIP=$1
 REPOSITORY_ROOT=$2
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LINE_ENDING_RECONCILER="$SCRIPT_DIR/reconcile-qidi-max4-line-endings.py"
 DEST_CONFIG_DIR="$REPOSITORY_ROOT/config"
 DEST_KLIPPY_DIR="$REPOSITORY_ROOT/klipper/klippy"
 PACKAGE_IDENTITY_FILE="$REPOSITORY_ROOT/firmware-package.json"
@@ -139,6 +141,9 @@ jq -n \
   }' > "$PACKAGE_IDENTITY_TEMP"
 
 mkdir -p "$DEST_KLIPPY_DIR"
+
+python3 "$LINE_ENDING_RECONCILER" "$SOURCE_CONFIG_DIR" "$DEST_CONFIG_DIR"
+python3 "$LINE_ENDING_RECONCILER" "$SOURCE_KLIPPY_DIR" "$DEST_KLIPPY_DIR"
 
 rsync -a --checksum --delete \
   --exclude 'KAMP/' \

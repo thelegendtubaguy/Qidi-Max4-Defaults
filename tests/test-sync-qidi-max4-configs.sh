@@ -4,6 +4,7 @@ set -euo pipefail
 REPOSITORY_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SYNC_SCRIPT="$REPOSITORY_ROOT/.github/scripts/sync-qidi-max4-configs.sh"
 CHANGE_DETECTOR="$REPOSITORY_ROOT/.github/scripts/has-qidi-max4-sync-changes.sh"
+LINE_ENDING_RECONCILER="$REPOSITORY_ROOT/.github/scripts/reconcile-qidi-max4-line-endings.py"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -39,6 +40,7 @@ create_firmware_fixture() {
   local homing_content=$4
   local mcu_content=$5
   local macro_content=$6
+  local line_endings=${7:-lf}
   local soc_name="QD_MAX4_SOC_01.01.06.04_${revision}_Release_NA"
   local package_dir="$fixture_root/package"
   local deb_dir="$fixture_root/deb"
@@ -69,6 +71,26 @@ create_firmware_fixture() {
   printf '%s\n' 'int fixture(void);' > "$data_dir/home/qidi/klipper/klippy/chelper/fixture.h"
   printf '\177ELF\000fixture-binary\377' > "$data_dir/home/qidi/klipper/klippy/chelper/fixture.so"
   chmod 755 "$data_dir/home/qidi/klipper/klippy/chelper/fixture.so"
+
+  case "$line_endings" in
+    lf)
+      ;;
+    crlf)
+      python3 - "$data_dir" <<'PYTHON'
+import pathlib
+import sys
+
+text_suffixes = {".c", ".cfg", ".conf", ".h", ".json", ".py"}
+for path in pathlib.Path(sys.argv[1]).rglob("*"):
+    if path.is_file() and path.suffix.lower() in text_suffixes:
+        data = path.read_bytes().replace(b"\r\n", b"\n")
+        path.write_bytes(data.replace(b"\n", b"\r\n"))
+PYTHON
+      ;;
+    *)
+      fail "unsupported fixture line endings: $line_endings"
+      ;;
+  esac
 
   cat > "$control_dir/control" <<'CONTROL'
 Package: qd-max4-system
@@ -187,15 +209,33 @@ IDENTITY_SHA_AFTER=$(sha256_file "$DESTINATION/firmware-package.json")
 [ "$IDENTITY_SHA_BEFORE" = "$IDENTITY_SHA_AFTER" ] \
   || fail 'package identity output is not deterministic'
 
+PRINTER_BEFORE_SECOND_SYNC="$WORK_DIR/printer-before-second-sync.cfg"
+FIXTURE_CONFIG_BEFORE_SECOND_SYNC="$WORK_DIR/fixture-config-before-second-sync.cfg"
+cp "$DESTINATION/config/printer.cfg" "$PRINTER_BEFORE_SECOND_SYNC"
+cp "$DESTINATION/klipper/klippy/extras/fixture.cfg" "$FIXTURE_CONFIG_BEFORE_SECOND_SYNC"
+
 create_firmware_fixture \
   "$WORK_DIR/fixture-two" \
   "$ARCHIVE_TWO" \
   '20260612' \
   'homing revision two with endstop reset' \
   'mcu revision two with endstop_sync_reset' \
-  'macro revision two'
+  'macro revision two' \
+  'crlf'
 
 bash "$SYNC_SCRIPT" "$ARCHIVE_TWO" "$DESTINATION"
+
+cmp "$PRINTER_BEFORE_SECOND_SYNC" "$DESTINATION/config/printer.cfg" \
+  || fail 'line-ending-only config change was not ignored'
+cmp "$FIXTURE_CONFIG_BEFORE_SECOND_SYNC" "$DESTINATION/klipper/klippy/extras/fixture.cfg" \
+  || fail 'line-ending-only Klippy change was not ignored'
+if grep -Il $'\r' \
+  "$DESTINATION/klipper/klippy/extras/homing.py" \
+  "$DESTINATION/klipper/klippy/mcu.py" \
+  "$DESTINATION/config/klipper-macros-qd/qd_macro.cfg" \
+  | grep -q .; then
+  fail 'changed text files did not retain the repository LF convention'
+fi
 
 assert_file_content 'homing revision two with endstop reset' "$DESTINATION/klipper/klippy/extras/homing.py"
 assert_file_content 'mcu revision two with endstop_sync_reset' "$DESTINATION/klipper/klippy/mcu.py"
@@ -204,6 +244,26 @@ assert_file_content 'macro revision two' "$DESTINATION/config/klipper-macros-qd/
   || fail 'same-version package revision changed the SOC version unexpectedly'
 [ "$(jq -r '.firmware_archive.sha256' "$DESTINATION/firmware-package.json")" = "$(sha256_file "$ARCHIVE_TWO")" ] \
   || fail 'same-version package revision did not update archive identity'
+
+RECONCILE_SOURCE="$WORK_DIR/reconcile-source"
+RECONCILE_DESTINATION="$WORK_DIR/reconcile-destination"
+mkdir -p "$RECONCILE_SOURCE" "$RECONCILE_DESTINATION"
+printf 'unchanged one\nunchanged two\n' > "$RECONCILE_SOURCE/unchanged.cfg"
+printf 'unchanged one\r\nunchanged two\r\n' > "$RECONCILE_DESTINATION/unchanged.cfg"
+printf 'new content\nsecond line\n' > "$RECONCILE_SOURCE/changed.py"
+printf 'old content\r\nsecond line\r\n' > "$RECONCILE_DESTINATION/changed.py"
+printf 'mixed one\r\nmixed two\n' > "$RECONCILE_SOURCE/mixed.conf"
+printf 'mixed one\nmixed two\n' > "$RECONCILE_DESTINATION/mixed.conf"
+printf 'unchanged one\r\nunchanged two\r\n' > "$WORK_DIR/expected-unchanged.cfg"
+printf 'new content\r\nsecond line\r\n' > "$WORK_DIR/expected-changed.py"
+
+python3 "$LINE_ENDING_RECONCILER" "$RECONCILE_SOURCE" "$RECONCILE_DESTINATION"
+cmp "$WORK_DIR/expected-unchanged.cfg" "$RECONCILE_SOURCE/unchanged.cfg" \
+  || fail 'LF-only source change did not retain existing CRLF bytes'
+cmp "$WORK_DIR/expected-changed.py" "$RECONCILE_SOURCE/changed.py" \
+  || fail 'changed LF source did not retain the repository CRLF convention'
+cmp "$RECONCILE_DESTINATION/mixed.conf" "$RECONCILE_SOURCE/mixed.conf" \
+  || fail 'line-ending-only mixed source change did not retain checked-in bytes'
 
 DETECTION_REPOSITORY="$WORK_DIR/change-detection"
 mkdir -p "$DETECTION_REPOSITORY/config" "$DETECTION_REPOSITORY/klipper/klippy"
