@@ -1,3 +1,5 @@
+![Tuba Makes](.github/images/tuba-makes-logo.png)
+
 # QIDI Max 4 Firmware Reference
 
 This repository tracks package-owned files shipped in QIDI Max 4 firmware.
