@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "soc_version": "01.01.06.05",
+  "soc_version": "01.01.07.01",
   "firmware_archive": {
-    "filename": "QD_MAX4_01.01.06.05_20260804_Release.zip",
-    "sha256": "b1826d1aed274c7233b4a23a3a3e5c0b4e9655c5d03188a8b6f3561f0d3f2de7"
+    "filename": "QD_MAX4_01.01.07.01_20261016_Release.zip",
+    "sha256": "0cc97445e77295116adaa665ff463e77608d4929520bd7cd46e732fbb0a6ecf2"
   },
   "firmware_manifest": {
-    "sha256": "486056fb9a39417d50c9e9691a79839aaf48911b1486bdd8b88957a078ead564"
+    "sha256": "dc7355726be2741fd48c1aa8dcc43e53d33da48687ff8faef76365e31844c10b"
   },
   "soc_payload": {
-    "filename": "QD_MAX4_SOC_01.01.06.05_20260804_Release_NA",
-    "sha256": "3df20701bf6e3a2914b0e2511e18bb5a3ec17b1170797dc3d503608c20efc893",
+    "filename": "QD_MAX4_SOC_01.01.07.01_20261016_Release_NA",
+    "sha256": "668c65bf6a1f40252d81c93e6962fcd7e09b2486291ef7665d9c4aa22e108854",
     "region": "NA"
   }
 }
