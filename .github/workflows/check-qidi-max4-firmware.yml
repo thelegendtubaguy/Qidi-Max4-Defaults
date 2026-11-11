@@ -26,7 +26,8 @@ concurrency:
 
 jobs:
   check-firmware:
-    runs-on: ubuntu-latest
+    # QIDI's Cloudflare challenges GitHub-hosted runner IPs; run from the home network.
+    runs-on: [self-hosted, home]
     permissions:
       contents: read
     outputs:
@@ -264,7 +265,8 @@ jobs:
           if-no-files-found: ignore
 
   download-package:
-    runs-on: ubuntu-latest
+    # QIDI's Cloudflare challenges GitHub-hosted runner IPs; run from the home network.
+    runs-on: [self-hosted, home]
     needs: check-firmware
     if: needs.check-firmware.outputs.need_update == 'true' && (needs.check-firmware.outputs.package_candidate_changed == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.download_package == true || inputs.publish_release == true)))
     permissions:
@@ -282,6 +284,11 @@ jobs:
           PACKAGE_DIR="package-artifacts"
 
           mkdir -p "$PACKAGE_DIR"
+
+          if ! command -v file >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends file
+          fi
 
           wget -O "$PACKAGE_DIR/$PACKAGE_NAME" "$PACKAGE_URL"
           ARCHIVE_SHA256=$(sha256sum "$PACKAGE_DIR/$PACKAGE_NAME" | tee "$PACKAGE_DIR/$PACKAGE_NAME.sha256" | awk '{print $1}')
