@@ -6,8 +6,12 @@ This repository tracks package-owned files shipped in QIDI Max 4 firmware.
 
 Use tags and commit history to compare package revisions.
 
-> [!NOTE]
-> If you want to help support content like this, consider subscribing over on [YouTube](https://youtube.com/@TubaMakes)!
+<p>
+  <a href="https://youtube.com/@TubaMakes"><img alt="Subscribe to Tuba Makes on YouTube" src="https://img.shields.io/badge/YouTube-Tuba%20Makes-FF0000?style=for-the-badge&logo=youtube&logoColor=white"></a>
+  <a href="https://tubag.uy/patreon"><img alt="Support Tuba Makes on Patreon" src="https://img.shields.io/badge/Patreon-Support%20me-F96854?style=for-the-badge&logo=patreon&logoColor=white"></a>
+  <a href="https://ko-fi.com/M5J42AY0LP"><img alt="Support Tuba Makes on Ko-fi" src="https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20spool-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white"></a>
+  <a href="https://l.tubaguy.com/tmdiscord"><img alt="Join the Tuba Makes Discord" src="https://img.shields.io/badge/Discord-Tuba%20Makes-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+</p>
 
 ## Scope
 
